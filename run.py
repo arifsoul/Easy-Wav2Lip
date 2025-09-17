@@ -43,6 +43,7 @@ output_height = config['OPTIONS']['output_height']
 wav2lip_version = config['OPTIONS']['wav2lip_version']
 use_previous_tracking_data = config['OPTIONS']['use_previous_tracking_data']
 nosmooth = config.getboolean('OPTIONS', 'nosmooth')
+wav2lip_batch_size = config.getint('OPTIONS', 'wav2lip_batch_size')
 U = config.getint('PADDING', 'U')
 D = config.getint('PADDING', 'D')
 L = config.getint('PADDING', 'L')
@@ -269,7 +270,7 @@ while True:
     audio_length = get_input_length(temp_input_audio)
 
     if preview_settings:
-        batch_process = False
+        # batch_process = False
 
         preview_length_seconds = 1
         converted_preview_frame = frame_to_preview / in_fps

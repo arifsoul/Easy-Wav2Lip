@@ -1,9 +1,10 @@
 @echo off
 :run_loop
-call GUI.py
+python GUI.py
 
 if exist "run.txt" (
-	echo starting Easy-Wav2Lip...
-	python run.py
-	goto run_loop
-	)
+    echo starting Easy-Wav2Lip...
+    python run.py
+    del run.txt
+    goto run_loop
+)

@@ -1,5 +1,13 @@
+# inference.py (Optimized with DataLoader)
+#
+# Deskripsi:
+# Versi yang disempurnakan dari skrip inferensi Easy-Wav2Lip.
+# Menggantikan generator `datagen` manual dengan `torch.utils.data.Dataset` dan `DataLoader`
+# untuk pemuatan data yang lebih efisien dan standar, sambil mempertahankan semua fitur asli.
+
 print("\rloading torch       ", end="")
 import torch
+from torch.utils.data import Dataset, DataLoader
 
 print("\rloading numpy       ", end="")
 import numpy as np
@@ -125,8 +133,10 @@ parser.add_argument(
     help="Padding (top, bottom, left, right). Please adjust to include chin at least",
 )
 
+# Menaikkan nilai default batch size untuk performa yang lebih baik.
+# Pengguna masih bisa mengubahnya melalui command line.
 parser.add_argument(
-    "--wav2lip_batch_size", type=int, help="Batch size for Wav2Lip model(s)", default=1
+    "--wav2lip_batch_size", type=int, help="Batch size for Wav2Lip model(s)", default=16
 )
 
 parser.add_argument(
@@ -515,59 +525,54 @@ def face_detect(images, results_file="last_detected_face.pkl"):
 
     return results
 
+# Kelas Dataset kustom untuk menggantikan fungsi `datagen`
+class Wav2LipDataset(Dataset):
+    def __init__(self, full_frames, face_det_results, mel_chunks, args):
+        self.full_frames = full_frames
+        self.face_det_results = face_det_results
+        self.mel_chunks = mel_chunks
+        self.args = args
+        self.img_size = args.img_size
 
-def datagen(frames, mels):
-    img_batch, mel_batch, frame_batch, coords_batch = [], [], [], []
-    print("\r" + " " * 100, end="\r")
-    if args.box[0] == -1:
-        if not args.static:
-            face_det_results = face_detect(frames)  # BGR2RGB for CNN face detection
-        else:
-            face_det_results = face_detect([frames[0]])
-    else:
-        print("Using the specified bounding box instead of face detection...")
-        y1, y2, x1, x2 = args.box
-        face_det_results = [[f[y1:y2, x1:x2], (y1, y2, x1, x2)] for f in frames]
+    def __len__(self):
+        return len(self.mel_chunks)
 
-    for i, m in enumerate(mels):
-        idx = 0 if args.static else i % len(frames)
-        frame_to_save = frames[idx].copy()
-        face, coords = face_det_results[idx].copy()
+    def __getitem__(self, i):
+        # Mengambil data untuk indeks saat ini
+        mel = self.mel_chunks[i]
+        
+        # Menentukan frame video yang akan digunakan
+        idx = 0 if self.args.static else i % len(self.full_frames)
+        frame = self.full_frames[idx]
+        face, coords = self.face_det_results[idx]
 
-        face = cv2.resize(face, (args.img_size, args.img_size))
+        # Pra-pemrosesan wajah untuk input model
+        face_resized = cv2.resize(face.copy(), (self.img_size, self.img_size))
+        
+        img_masked = face_resized.copy()
+        img_masked[self.img_size // 2:, :, :] = 0
+        
+        # Menggabungkan wajah yang dimasker dan yang asli, lalu normalisasi
+        img_concatenated = np.concatenate((img_masked, face_resized), axis=2) / 255.0
+        
+        # Pra-pemrosesan mel spectrogram
+        mel_reshaped = np.reshape(mel, [mel.shape[0], mel.shape[1], 1])
+        
+        return img_concatenated, mel_reshaped, frame, coords
 
-        img_batch.append(face)
-        mel_batch.append(m)
-        frame_batch.append(frame_to_save)
-        coords_batch.append(coords)
-
-        if len(img_batch) >= args.wav2lip_batch_size:
-            img_batch, mel_batch = np.asarray(img_batch), np.asarray(mel_batch)
-
-            img_masked = img_batch.copy()
-            img_masked[:, args.img_size // 2 :] = 0
-
-            img_batch = np.concatenate((img_masked, img_batch), axis=3) / 255.0
-            mel_batch = np.reshape(
-                mel_batch, [len(mel_batch), mel_batch.shape[1], mel_batch.shape[2], 1]
-            )
-
-            yield img_batch, mel_batch, frame_batch, coords_batch
-            img_batch, mel_batch, frame_batch, coords_batch = [], [], [], []
-
-    if len(img_batch) > 0:
-        img_batch, mel_batch = np.asarray(img_batch), np.asarray(mel_batch)
-
-        img_masked = img_batch.copy()
-        img_masked[:, args.img_size // 2 :] = 0
-
-        img_batch = np.concatenate((img_masked, img_batch), axis=3) / 255.0
-        mel_batch = np.reshape(
-            mel_batch, [len(mel_batch), mel_batch.shape[1], mel_batch.shape[2], 1]
-        )
-
-        yield img_batch, mel_batch, frame_batch, coords_batch
-
+# Fungsi collate kustom untuk menangani tipe data yang berbeda dalam satu batch
+def collate_fn(batch):
+    # batch adalah list dari tuple: [(img_1, mel_1, frame_1, coords_1), ...]
+    
+    # Tumpuk (stack) input model (img dan mel) menjadi tensor batch
+    img_batch = torch.FloatTensor(np.transpose([item[0] for item in batch], (0, 3, 1, 2)))
+    mel_batch = torch.FloatTensor(np.transpose([item[1] for item in batch], (0, 3, 1, 2)))
+    
+    # Simpan frame dan koordinat sebagai list Python biasa
+    frames = [item[2] for item in batch]
+    coords = [item[3] for item in batch]
+    
+    return img_batch, mel_batch, frames, coords
 
 mel_step_size = 16
 
@@ -583,7 +588,6 @@ def _load(checkpoint_path):
 
 def main():
     args.img_size = 96
-    frame_number = 11
 
     if os.path.isfile(args.face) and args.face.split(".")[1] in ["jpg", "png", "jpeg"]:
         args.static = True
@@ -629,17 +633,8 @@ def main():
 
     if not args.audio.endswith(".wav"):
         print("Converting audio to .wav")
-        subprocess.check_call(
-            [
-                "ffmpeg",
-                "-y",
-                "-loglevel",
-                "error",
-                "-i",
-                args.audio,
-                "temp/temp.wav",
-            ]
-        )
+        command = ["ffmpeg", "-y", "-loglevel", "error", "-i", args.audio, "temp/temp.wav"]
+        subprocess.run(command, check=True)
         args.audio = "temp/temp.wav"
 
     print("analysing audio...")
@@ -667,16 +662,31 @@ def main():
     if str(args.preview_settings) == "True":
         full_frames = [full_frames[0]]
         mel_chunks = [mel_chunks[0]]
-    print(str(len(full_frames)) + " frames to process")
+        
+    print(f"{len(full_frames)} frames to process")
     batch_size = args.wav2lip_batch_size
-    if str(args.preview_settings) == "True":
-        gen = datagen(full_frames, mel_chunks)
+    
+    # --- PERUBAHAN UTAMA: Menggunakan DataLoader ---
+    # 1. Deteksi wajah dilakukan di awal untuk semua frame
+    if args.box[0] == -1:
+        if not args.static:
+            face_det_results = face_detect(full_frames)
+        else:
+            face_det_results = face_detect([full_frames[0]])
     else:
-        gen = datagen(full_frames.copy(), mel_chunks)
+        print("Using the specified bounding box instead of face detection...")
+        y1, y2, x1, x2 = args.box
+        face_det_results = [[f[y1:y2, x1:x2], (y1, y2, x1, x2)] for f in full_frames]
 
+    # 2. Membuat Dataset dan DataLoader
+    dataset = Wav2LipDataset(full_frames, face_det_results, mel_chunks, args)
+    # num_workers=0 untuk kompatibilitas silang (terutama di Windows)
+    data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0, collate_fn=collate_fn)
+
+    # 3. Loop utama sekarang mengiterasi melalui DataLoader
     for i, (img_batch, mel_batch, frames, coords) in enumerate(
         tqdm(
-            gen,
+            data_loader,
             total=int(np.ceil(float(len(mel_chunks)) / batch_size)),
             desc="Processing Wav2Lip",
             ncols=100,
@@ -695,9 +705,10 @@ def main():
             frame_h, frame_w = full_frames[0].shape[:-1]
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             out = cv2.VideoWriter("temp/result.mp4", fourcc, fps, (frame_w, frame_h))
-
-        img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
-        mel_batch = torch.FloatTensor(np.transpose(mel_batch, (0, 3, 1, 2))).to(device)
+        
+        # Pindahkan batch tensor ke device (GPU/CPU)
+        img_batch = img_batch.to(device)
+        mel_batch = mel_batch.to(device)
 
         with torch.no_grad():
             pred = model(mel_batch, img_batch)
@@ -705,8 +716,6 @@ def main():
         pred = pred.cpu().numpy().transpose(0, 2, 3, 1) * 255.0
 
         for p, f, c in zip(pred, frames, coords):
-            # cv2.imwrite('temp/f.jpg', f)
-
             y1, y2, x1, x2 = c
 
             if (
@@ -756,24 +765,16 @@ def main():
     # Close the window(s) when done
     cv2.destroyAllWindows()
 
-    out.release()
+    if 'out' in locals() and out.isOpened():
+        out.release()
 
     if str(args.preview_settings) == "False":
         print("converting to final video")
-
-        subprocess.check_call([
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-i",
-            "temp/result.mp4",
-            "-i",
-            args.audio,
-            "-c:v",
-            "libx264",
-            args.outfile
-        ])
+        command = [
+            "ffmpeg", "-y", "-loglevel", "error", "-i", "temp/result.mp4",
+            "-i", args.audio, "-c:v", "libx264", "-crf", "23", "-preset", "medium", args.outfile
+        ]
+        subprocess.run(command, check=True)
 
 if __name__ == "__main__":
     args = parser.parse_args()
