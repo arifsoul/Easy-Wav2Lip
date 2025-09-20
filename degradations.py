@@ -5,7 +5,7 @@ import random
 import torch
 from scipy import special
 from scipy.stats import multivariate_normal
-from torchvision.transforms.functional import rgb_to_grayscale
+from torchvision.transforms.v2.functional import to_grayscale
 
 # -------------------------------------------------------------------- #
 # --------------------------- blur kernels --------------------------- #
@@ -627,7 +627,7 @@ def generate_poisson_noise_pt(img, scale=1.0, gray_noise=0):
         gray_noise = gray_noise.view(b, 1, 1, 1)
         cal_gray_noise = torch.sum(gray_noise) > 0
     if cal_gray_noise:
-        img_gray = rgb_to_grayscale(img, num_output_channels=1)
+        img_gray = to_grayscale(img, num_output_channels=1)
         # round and clip image for counting vals correctly
         img_gray = torch.clamp((img_gray * 255.0).round(), 0, 255) / 255.
         # use for-loop to get the unique values for each sample
@@ -740,11 +740,20 @@ def add_jpg_compression(img, quality=90):
         (Numpy array): Returned image after JPG, shape (h, w, c), range[0, 1],
             float32.
     """
-    img = np.clip(img, 0, 1)
+    # Clip and convert to uint8
+    img_u8 = np.clip(img * 255.0, 0, 255).astype(np.uint8)
+    
+    # Ensure the array is C-contiguous before passing to OpenCV
+    img_contiguous = np.ascontiguousarray(img_u8)
+    
     encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
-    _, encimg = cv2.imencode('.jpg', img * 255., encode_param)
-    img = np.float32(cv2.imdecode(encimg, 1)) / 255.
-    return img
+    _, encimg = cv2.imencode('.jpg', img_contiguous, encode_param)
+    
+    # Decode and convert back to float32
+    img_dec = cv2.imdecode(encimg, 1)
+    img_out = np.float32(img_dec) / 255.
+    
+    return img_out
 
 
 def random_add_jpg_compression(img, quality_range=(90, 100)):
@@ -762,3 +771,4 @@ def random_add_jpg_compression(img, quality_range=(90, 100)):
     """
     quality = np.random.uniform(quality_range[0], quality_range[1])
     return add_jpg_compression(img, quality)
+
