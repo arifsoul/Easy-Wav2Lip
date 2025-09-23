@@ -1,4 +1,4 @@
-# inference.py (Optimized with DataLoader)
+# Easy-Wav2Lip/inference.py (Optimized with DataLoader)
 #
 # Deskripsi:
 # Versi yang disempurnakan dari skrip inferensi Easy-Wav2Lip.
